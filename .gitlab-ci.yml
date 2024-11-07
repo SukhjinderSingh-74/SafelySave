@@ -1,0 +1,124 @@
+stages:
+  - lint
+  - build
+  - test
+  - deploy_testing
+  - deploy_production
+
+# Global Variables
+variables:
+  PROJECT_NAME: "safeupload"
+  IMAGE_NAME: "$CI_REGISTRY_IMAGE:$CI_COMMIT_REF_SLUG"
+  GOOGLE_APPLICATION_CREDENTIALS: "/tmp/gcp-key.json"
+  GCLOUD_PROJECT: "$GCP_PROJECT_ID"
+  GCLOUD_REGION: "$GCP_REGION"
+
+# Cache dependencies to speed up builds
+cache:
+  paths:
+    - .venv/
+    - __pycache__/
+    - tests/__pycache__/
+
+# Linting Stage: Check code style with flake8
+lint:
+  stage: lint
+  image: python:3.10
+  before_script:
+    - python -m venv .venv
+    - source .venv/bin/activate
+    - pip install -r requirements.txt
+    - pip install flake8
+  script:
+    - flake8 app.py index.html
+  only:
+    - merge_requests
+    - main
+    - develop
+
+# Build Stage: Build and push the Docker image
+build:
+  stage: build
+  image: docker:latest
+  services:
+    - docker:dind
+  variables:
+    DOCKER_DRIVER: overlay2
+  before_script:
+    - echo "$CI_JOB_TOKEN" | docker login -u gitlab-ci-token --password-stdin $CI_REGISTRY
+  script:
+    - echo "Building Docker image..."
+    - docker build -t $IMAGE_NAME .
+    - docker push $IMAGE_NAME
+  only:
+    - main
+    - develop
+
+# Test Stage: Run automated unit tests
+test:
+  stage: test
+  image: python:3.10
+  before_script:
+    - python -m venv .venv
+    - source .venv/bin/activate
+    - pip install -r requirements.txt
+    - pip install pytest
+  script:
+    - echo "Running unit tests..."
+    - pytest tests/
+  artifacts:
+    when: always
+    reports:
+      junit: junit.xml
+    paths:
+      - tests/__pycache__/
+  only:
+    - main
+    - develop
+
+# Deploy to Testing Environment
+deploy_testing:
+  stage: deploy_testing
+  image: google/cloud-sdk:latest
+  environment:
+    name: testing
+    url: https://testing.safeupload.example.com
+  before_script:
+    - echo "$GCP_SERVICE_ACCOUNT_KEY" | base64 -d > $GOOGLE_APPLICATION_CREDENTIALS
+    - gcloud auth activate-service-account --key-file $GOOGLE_APPLICATION_CREDENTIALS
+    - gcloud config set project $GCLOUD_PROJECT
+    - gcloud config set run/region $GCLOUD_REGION
+  script:
+    - echo "Deploying to testing environment..."
+    - gcloud run deploy $PROJECT_NAME-testing --image $IMAGE_NAME --platform managed --allow-unauthenticated --set-env-vars ENVIRONMENT=testing
+  only:
+    - develop
+
+# Deploy to Production Environment
+deploy_production:
+  stage: deploy_production
+  image: google/cloud-sdk:latest
+  environment:
+    name: production
+    url: https://safeupload.example.com
+  before_script:
+    - echo "$GCP_SERVICE_ACCOUNT_KEY" | base64 -d > $GOOGLE_APPLICATION_CREDENTIALS
+    - gcloud auth activate-service-account --key-file $GOOGLE_APPLICATION_CREDENTIALS
+    - gcloud config set project $GCLOUD_PROJECT
+    - gcloud config set run/region $GCLOUD_REGION
+  script:
+    - echo "Deploying to production environment..."
+    - gcloud run deploy $PROJECT_NAME --image $IMAGE_NAME --platform managed --allow-unauthenticated --set-env-vars ENVIRONMENT=production
+  only:
+    - main
+  when: manual
+  dependencies:
+    - build
+
+# Cleanup Job (Optional): Remove old Docker images or artifacts
+cleanup:
+  stage: deploy_production
+  script:
+    - echo "Cleanup tasks can be added here"
+  when: always
+  allow_failure: true
